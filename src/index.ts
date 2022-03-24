@@ -19,45 +19,55 @@ class FieldObject {
     const ctor = this.constructor as new(x: number, y: number) => this;
     return new ctor(this.pos.x, this.pos.y)
   }
+
+  public getUp()    { return new Position(this.pos.x, this.pos.y - 1) }
+  public getDown()  { return new Position(this.pos.x, this.pos.y + 1) }
+  public getLeft()  { return new Position(this.pos.x - 1, this.pos.y) }
+  public getRight() { return new Position(this.pos.x + 1, this.pos.y) }
 }
 class Wall   extends FieldObject {}
 class Block  extends FieldObject {
   public canMoveTo(direction: Direction, state: State) {
-    // state.print()
     switch (direction) {
       case 'UP':
       case 'DOWN': {
-        const up   = new Position(this.pos.x, this.pos.y - 1)
+        const up   = this.getUp()
         if ( state.hasWallAt(up) || state.hasBlockAt(up)) { return false }
 
-        const down = new Position(this.pos.x, this.pos.y + 1)
+        const down = this.getDown()
         if ( state.hasWallAt(down) || state.hasBlockAt(down)) { return false }
 
-        const distance = state.getDistanceBetween(state.player.pos, (direction === 'UP' ? down : up))
-        if ( !isFinite(distance) ) { return false }
-        // TODO: 移動後の詰みチェック
-        //       goalでない && 全方向に動けない
         return true
       }
       case 'LEFT':
       case 'RIGHT': {
-        const left = new Position(this.pos.x - 1, this.pos.y)
+        const left = this.getLeft()
         if ( state.hasWallAt(left) || state.hasBlockAt(left)) { return false }
 
-        const right = new Position(this.pos.x + 1, this.pos.y)
+        const right = this.getRight()
         if ( state.hasWallAt(right) || state.hasBlockAt(right)) { return false }
 
-        const distance = state.getDistanceBetween(state.player.pos, (direction === 'LEFT' ? right : left))
-        if ( !isFinite(distance) ) { return false }
-        // TODO: 移動後の詰みチェック
         return true
       }
     }
   }
 
   public isStucked(state: State) {
-    const directions: Direction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT']
-    // return directions.every(i => !this.canMoveTo(direction))
+    const up    = this.getUp()
+    const down  = this.getDown()
+    const left  = this.getLeft()
+    const right = this.getRight()
+
+    // そこが目的地なら OK
+    if ( state.hasGoalAt(this.pos) ) { return false }
+
+    // 2 方向壁だと動かせない
+    if ( (state.hasWallAt(up)   || state.hasWallAt(down)) &&
+         (state.hasWallAt(left) || state.hasWallAt(right)) ) { return true }
+
+    // TODO: ブロック 4 つ組も true
+    // TODO: 複数の荷物で狭い分離エリアを作ってしまっているケース (判定要検討) も true
+
     return false
   }
 }
@@ -65,34 +75,46 @@ class Goal   extends FieldObject {}
 class Player extends FieldObject {}
 
 class State {
-  private nRows:    number  // the number of rows
-  private nColumns: number  // the number of columns
+  // total steps
+  private _totalCost: number
+  get     totalCost() { return this._totalCost }
+  public  addCost(cost: number) { return this._totalCost += cost }
 
-  public player:    Player
-  public walls:     Wall[]
-  public goals:     Goal[]
-  public blocks:    Block[]
+  private _nRows:     number  // the number of rows
+  private _nColumns:  number  // the number of columns
 
-  public isClonedBy?: State
+  private _player:     Player
+  private _walls:      Wall[]
+  private _goals:      Goal[]
+  private _blocks:     Block[]
+  public  hasWallAt (pos: Position) { return this._walls .some(i => i.pos.equals(pos)) }
+  public  hasBlockAt(pos: Position) { return this._blocks.some(i => i.pos.equals(pos)) }
+  public  hasGoalAt (pos: Position) { return this._goals .some(i => i.pos.equals(pos)) }
+
+  private _isClonedBy?: State
+  get     isClonedBy() { return this._isClonedBy }
+
 
   constructor(input: string)
   constructor(state: State)
   constructor(arg?: any) {
     if (arg instanceof State) {
-      this.nRows    = arg.nRows
-      this.nColumns = arg.nColumns
-      this.player   = arg.player.clone()
-      this.walls    = arg.walls.map(i => new Wall(i.pos.x, i.pos.y))
-      this.goals    = arg.goals.map(i => new Goal(i.pos.x, i.pos.y))
-      this.blocks   = arg.blocks.map(i => new Block(i.pos.x, i.pos.y))
+      this._totalCost = arg._totalCost
+      this._nRows     = arg._nRows
+      this._nColumns  = arg._nColumns
+      this._player    = arg._player.clone()
+      this._walls     = arg._walls.map(i => new Wall(i.pos.x, i.pos.y))
+      this._goals     = arg._goals.map(i => new Goal(i.pos.x, i.pos.y))
+      this._blocks    = arg._blocks.map(i => new Block(i.pos.x, i.pos.y))
     }
     else if (typeof arg === 'string') {
-      this.nRows    = 0                  // dummy
-      this.nColumns = 0                  // dummy
-      this.player   = new Player(-1, -1) // dummy
-      this.walls    = []
-      this.goals    = []
-      this.blocks   = []
+      this._totalCost = 0
+      this._nRows     = 0                  // dummy
+      this._nColumns  = 0                  // dummy
+      this._player    = new Player(-1, -1) // dummy
+      this._walls     = []
+      this._goals     = []
+      this._blocks    = []
 
       this.load(arg)
     }
@@ -103,54 +125,63 @@ class State {
 
   // operation
   public getNextStates(): State[] {
-    const nextStates = this.blocks.flatMap(targetBlock => {
+    const nextStates = this._blocks.flatMap(targetBlock => {
       const newStates: State[] = []
       for (const direction of ['UP', 'DOWN', 'LEFT', 'RIGHT'] as Direction[]) {
-        if (targetBlock.canMoveTo(direction, this)) {
-          const clone = this.clone()
-          clone.moveBlock(targetBlock, direction)
-          newStates.push(clone)
+        const newState = this.moveBlock(targetBlock, direction)
+        if (newState != null) {
+          newStates.push(newState)
         }
-        // else {
-        //   console.log(`cannot move to ${direction}`)
-        // }
       }
       return newStates
     })
     return nextStates
   }
 
-  public moveBlock(block: Block, direction: Direction) {
-    const targetBlock = this.blocks.find(i => i.pos.equals(block.pos))
+  public moveBlock(block: Block, direction: Direction): State | null {
+    const clone = this.clone()
+
+    // clone 側で同じ荷物を探す
+    const targetBlock = clone._blocks.find(i => i.pos.equals(block.pos))
     if ( targetBlock == null ) {
-      throw new Error(`Failed to move block. No block found at (${block.pos.x}, ${block.pos.y})`)
+      console.log(`Failed to move block. No block is found at (${block.pos.x}, ${block.pos.y})`)
+      return null
     }
 
-    this.player.pos = new Position(targetBlock.pos.x, targetBlock.pos.y)
+    // direction 方向に押す場合のプレイヤー位置
+    const playerNewPos = direction === 'UP'    ? targetBlock.getDown()
+                       : direction === 'DOWN'  ? targetBlock.getUp()
+                       : direction === 'LEFT'  ? targetBlock.getRight()
+                       : direction === 'RIGHT' ? targetBlock.getLeft()
+                       :                         new Position(-1, -1)
+
+    // 移動先 (playerNewPos) までの距離
+    const distance = clone.getDistanceBetween(clone._player.pos, playerNewPos)
+    if ( !isFinite(distance) ) { return null }
+
+    // 物理的に押すことができるかチェック
+    if ( !targetBlock.canMoveTo(direction, clone) ) { return null }
+
+    // 移動
+    clone._player.pos = new Position(targetBlock.pos.x, targetBlock.pos.y)
     switch (direction) {
       case 'UP':    targetBlock.pos.y--; break
       case 'DOWN':  targetBlock.pos.y++; break
       case 'LEFT':  targetBlock.pos.x--; break
       case 'RIGHT': targetBlock.pos.x++; break
     }
+    clone.addCost(distance + 1) // 荷物を押す分で +1
+
+    // 押したら詰むかチェック
+    if ( targetBlock.isStucked(clone) ) { return null }
+
+    return clone
   }
 
   // utility
-  public hasWallAt(pos: Position) {
-    return this.walls.some(i => i.pos.equals(pos))
-  }
-
-  public hasBlockAt(pos: Position) {
-    return this.blocks.some(i => i.pos.equals(pos))
-  }
-
-  public hasGoalAt(pos: Position) {
-    return this.goals.some(i => i.pos.equals(pos))
-  }
-
   public getDistanceBetween(p1: Position, p2: Position) {
     const costMap: (number|string)[][] = []
-    for (let i = 0; i < this.nRows; i++) { costMap.push([]) }
+    for (let i = 0; i < this._nRows; i++) { costMap.push([]) }
 
     for (let cost = 0, frontier = [p1]; cost < 1000; cost++) {
       if (frontier.length === 0) { break }
@@ -183,23 +214,23 @@ class State {
   }
 
   public isCleared() {
-    return this.goals.every(goal => this.hasBlockAt(goal.pos))
+    return this._goals.every(goal => this.hasBlockAt(goal.pos))
   }
 
-  public isGameover() {
-    return this.blocks.some(i => i.isStucked(this))
-  }
+  // public isGameover() {
+  //   return this.blocks.some(i => i.isStucked(this))
+  // }
 
   public equals(state: State) {
     // ブロック数は変わらないので, 数が異なる場合は考慮しない
-    if ( this.blocks.every(i => state.hasBlockAt(i.pos)) === false ) {
+    if ( this._blocks.every(i => state.hasBlockAt(i.pos)) === false ) {
       return false
     }
 
     // 移動可能エリアが分割されている時, プレイヤーのいるエリア区別する必要がある
     // ブロック配置が同じであることは保証されているので, 一方のフィールド情報で移動できるかチェックする
     // (距離無限なら移動できない → 異なるエリアにいる → 別の状態扱いにする)
-    if ( !isFinite(this.getDistanceBetween(this.player.pos, state.player.pos)) ) {
+    if ( !isFinite(this.getDistanceBetween(this._player.pos, state._player.pos)) ) {
       return false
     }
 
@@ -208,20 +239,20 @@ class State {
 
   public clone() {
     const clone = new State(this)
-    clone.isClonedBy = this
+    clone._isClonedBy = this
     return clone
   }
 
   public print() {
-    for (let y = 0; y < this.nRows; y++) {
-      for (let x = 0; x < this.nColumns; x++) {
+    for (let y = 0; y < this._nRows; y++) {
+      for (let x = 0; x < this._nColumns; x++) {
         const pos = new Position(x, y)
         let char = ' '
         if      (this.hasWallAt(pos))                         { char = 'x' }
         else if (this.hasBlockAt(pos) && this.hasGoalAt(pos)) { char = '*' }
         else if (this.hasBlockAt(pos))                        { char = '+' }
         else if (this.hasGoalAt(pos))                         { char = '-' }
-        else if (this.player.pos.equals(pos))                 { char = '@' }
+        else if (this._player.pos.equals(pos))                 { char = '@' }
 
         process.stdout.write(char)
       }
@@ -236,44 +267,65 @@ class State {
     const CELL_GOAL   = 4
     const CELL_PLAYER = 8
 
-    this.nRows    = input.split('\n').length
-    this.nColumns = input.split('\n').shift()?.length ?? 0
+    this._nRows    = input.split('\n').length
+    this._nColumns = input.split('\n').shift()?.length ?? 0
 
     input.split('\n').map((row, rowIdx) => {
       row.split('').map((cell, columnIdx) => {
         const value = parseInt(cell)
 
-        if (value & CELL_WALL  ) { this.walls.push(new Wall(columnIdx, rowIdx)) }
-        if (value & CELL_BLOCK ) { this.blocks.push(new Block(columnIdx, rowIdx)) }
-        if (value & CELL_GOAL  ) { this.goals.push(new Goal(columnIdx, rowIdx)) }
-        if (value & CELL_PLAYER) { this.player = new Player(columnIdx, rowIdx) }
+        if (value & CELL_WALL  ) { this._walls.push(new Wall(columnIdx, rowIdx)) }
+        if (value & CELL_BLOCK ) { this._blocks.push(new Block(columnIdx, rowIdx)) }
+        if (value & CELL_GOAL  ) { this._goals.push(new Goal(columnIdx, rowIdx)) }
+        if (value & CELL_PLAYER) { this._player = new Player(columnIdx, rowIdx) }
       })
     })
   }
 }
 
 class Solver {
-  private stateQueue:      State[]
-  private processedStates: State[] = []
+  private _stateQueue:      State[]
+  private _processedStates: State[] = []
+
+  private _lastState?: State
+
+  get history(): State[] {
+    const history = []
+
+    for (let state = this._lastState; state != null; state = state.isClonedBy) {
+      history.unshift(state)
+    }
+
+    return history
+  }
+  get totalCost() {
+    return this._lastState?.totalCost
+  }
+
 
   constructor(initState: State) {
-    this.stateQueue = [initState]
+    this._stateQueue = [initState]
   }
 
   public run() {
-    while ( this.stateQueue.length > 0 ) {
-      const state = this.stateQueue.shift()!
+    while ( this._stateQueue.length > 0 ) {
+      const state = this._stateQueue.shift()!
       // state.print()
-      this.processedStates.push(state)
+      this._processedStates.push(state)
 
       if ( state.isCleared() ) {
         console.log('solved')
+        this._lastState = state
+
         return state
       }
 
+      // TODO: equals でプレイヤーがいるエリア単位で同一パターン判定しているので,
+      //       歩数最短パターンを捨ててしまう可能性がある
+      //       エリア単位ではなく, シンプルに pos.equals にする？
       const nextStates = state
         .getNextStates()
-        .filter(i => !this.stateQueue.some(j => i.equals(j)) && !this.processedStates.some(j => i.equals(j)))
+        .filter(i => !this._stateQueue.some(j => i.equals(j)) && !this._processedStates.some(j => i.equals(j)))
       // nextStates.forEach(i => i.print())
 
       this._appendStates(nextStates)
@@ -283,8 +335,11 @@ class Solver {
   }
 
   private _appendStates(states: State[]) {
-    // TODO: insert using numStep
-    this.stateQueue.push(...states)
+    // priority queue として使う (木にする程でもないので splice するだけ)
+    for (const state of states) {
+      const insertIndex = this._stateQueue.findIndex(i => i.totalCost > state.totalCost)
+      this._stateQueue.splice(insertIndex, 0, state)
+    }
   }
 }
 
@@ -296,28 +351,33 @@ class Solver {
 // 1000041
 // 1111111`.trim()
 
+// const input = `
+// 11111111
+// 10001001
+// 10001001
+// 10028041
+// 11111111`.trim()
+
+// const input = `
+// 1111100
+// 1000110
+// 1002011
+// 1142841
+// 0111111`.trim()
+
 const input = `
-11111111
-10001001
-10001001
-10028041
-11111111`.trim()
+1111111
+1000111
+1002011
+1028201
+1002201
+1444441
+1111111`.trim()
 
 const state = new State(input)
 const solver = new Solver(state)
-const lastState = solver.run()
-if (lastState != null) { showHistory(lastState) }
 
-
-function showHistory(lastState: State) {
-  const history = []
-
-  let state = lastState
-  while ( true ) {
-    history.unshift(state)
-
-    if (state.isClonedBy == null) { break }
-    state = state.isClonedBy
-  }
-  history.forEach(i => i.print())
+if ( solver.run() ) {
+  solver.history.forEach(i => i.print())
+  console.log(solver.totalCost)
 }
